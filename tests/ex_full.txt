@@ -1,0 +1,31 @@
+function add(a as int, b as int) as int
+    dim result as int
+    if a > b then
+        dim temp as int
+        result = a + b;
+    else
+        dim temp1 as int
+        result = a - b;
+    end if
+end function
+
+function main()
+    dim x as int
+    dim y as int
+    dim z as int
+
+    x = 5;
+    y = 10;
+    z = x + y * x - y;
+
+    while z > 0
+        z = z - 1;
+    wend
+
+    do
+        x = x + 1;
+        if x > 10 then
+            break;
+        end if
+    loop until x > 15
+end function

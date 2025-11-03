@@ -1,0 +1,23 @@
+function add(a as int, b as int) as int
+    dim result as int
+    if a > b then
+        dim temp as int
+        dim temp1 as int
+        dim temp2 as int
+    else
+        dim temp3 as int
+        dim temp4 as int
+    end if
+end function
+
+function main()
+    dim a as int
+    dim b as int
+    dim c as int
+    dim d as int
+    a = 5;
+    b = 10;
+    c = 1;
+    d = 2;
+    z = a+b*c-d;
+end function

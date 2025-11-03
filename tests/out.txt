@@ -1,0 +1,90 @@
+Source
+  FuncDef (add)
+    FuncSignature (add)
+      ArgList
+        ArgDef (a)
+          BuiltinType (int)
+        ArgDef (b)
+          BuiltinType (int)
+      BuiltinType (int)
+    VarDecl
+      IdentifierList
+        Identifier (result)
+      BuiltinType (int)
+    IfStmt
+      CompareExpr
+        Identifier (a)
+        Identifier (b)
+      Then
+        VarDecl
+          IdentifierList
+            Identifier (temp)
+          BuiltinType (int)
+        AssignExpr
+          Identifier (result)
+          AddExpr
+            Identifier (a)
+            Identifier (b)
+      Else
+        VarDecl
+          IdentifierList
+            Identifier (temp1)
+          BuiltinType (int)
+        AssignExpr
+          Identifier (result)
+          SubExpr
+            Identifier (a)
+            Identifier (b)
+  FuncDef (main)
+    FuncSignature (main)
+    VarDecl
+      IdentifierList
+        Identifier (x)
+      BuiltinType (int)
+    VarDecl
+      IdentifierList
+        Identifier (y)
+      BuiltinType (int)
+    VarDecl
+      IdentifierList
+        Identifier (z)
+      BuiltinType (int)
+    AssignExpr
+      Identifier (x)
+      Literal (5)
+    AssignExpr
+      Identifier (y)
+      Literal (10)
+    AssignExpr
+      Identifier (z)
+      MulExpr
+        AddExpr
+          Identifier (x)
+          Identifier (y)
+        SubExpr
+          Identifier (x)
+          Identifier (y)
+    WhileStmt
+      CompareExpr
+        Identifier (z)
+        Literal (0)
+      AssignExpr
+        Identifier (z)
+        SubExpr
+          Identifier (z)
+          Literal (1)
+    DoLoopStmt
+      AssignExpr
+        Identifier (x)
+        AddExpr
+          Identifier (x)
+          Literal (1)
+      IfStmt
+        CompareExpr
+          Identifier (x)
+          Literal (10)
+        Then
+          BreakStmt
+      CompareExpr (UNTIL)
+        Identifier (x)
+        Literal (15)
