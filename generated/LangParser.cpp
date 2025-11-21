@@ -96,7 +96,7 @@ void langParserInitialize() {
   	1,12,1,12,1,12,5,12,211,8,12,10,12,12,12,214,9,12,1,13,1,13,1,13,1,13,
   	1,13,1,13,3,13,222,8,13,1,14,1,14,1,15,1,15,1,16,1,16,1,16,0,2,12,20,
   	17,0,2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,0,7,2,0,6,6,13,13,2,
-  	0,40,40,46,46,1,0,33,38,1,0,39,40,1,0,41,43,2,0,17,17,26,30,1,0,18,25,
+  	0,40,40,46,46,1,0,33,38,1,0,41,43,1,0,39,40,2,0,17,17,26,30,1,0,18,25,
   	247,0,37,1,0,0,0,2,42,1,0,0,0,4,44,1,0,0,0,6,55,1,0,0,0,8,65,1,0,0,0,
   	10,73,1,0,0,0,12,81,1,0,0,0,14,94,1,0,0,0,16,157,1,0,0,0,18,159,1,0,0,
   	0,20,171,1,0,0,0,22,196,1,0,0,0,24,207,1,0,0,0,26,221,1,0,0,0,28,223,
@@ -1969,7 +1969,7 @@ LangParser::ExprContext* LangParser::expr(int precedence) {
         }
 
         case 4: {
-          auto newContext = _tracker.createInstance<AddExprContext>(_tracker.createInstance<ExprContext>(parentContext, parentState));
+          auto newContext = _tracker.createInstance<MulExprContext>(_tracker.createInstance<ExprContext>(parentContext, parentState));
           _localctx = newContext;
           pushNewRecursionContext(newContext, startState, RuleExpr);
           setState(182);
@@ -1977,9 +1977,8 @@ LangParser::ExprContext* LangParser::expr(int precedence) {
           if (!(precpred(_ctx, 5))) throw FailedPredicateException(this, "precpred(_ctx, 5)");
           setState(183);
           _la = _input->LA(1);
-          if (!(_la == LangParser::ADD
-
-          || _la == LangParser::SUB)) {
+          if (!((((_la & ~ 0x3fULL) == 0) &&
+            ((1ULL << _la) & 15393162788864) != 0))) {
           _errHandler->recoverInline(this);
           }
           else {
@@ -1992,7 +1991,7 @@ LangParser::ExprContext* LangParser::expr(int precedence) {
         }
 
         case 5: {
-          auto newContext = _tracker.createInstance<MulExprContext>(_tracker.createInstance<ExprContext>(parentContext, parentState));
+          auto newContext = _tracker.createInstance<AddExprContext>(_tracker.createInstance<ExprContext>(parentContext, parentState));
           _localctx = newContext;
           pushNewRecursionContext(newContext, startState, RuleExpr);
           setState(185);
@@ -2000,8 +1999,9 @@ LangParser::ExprContext* LangParser::expr(int precedence) {
           if (!(precpred(_ctx, 4))) throw FailedPredicateException(this, "precpred(_ctx, 4)");
           setState(186);
           _la = _input->LA(1);
-          if (!((((_la & ~ 0x3fULL) == 0) &&
-            ((1ULL << _la) & 15393162788864) != 0))) {
+          if (!(_la == LangParser::ADD
+
+          || _la == LangParser::SUB)) {
           _errHandler->recoverInline(this);
           }
           else {

@@ -57,8 +57,8 @@ expr
     : expr OR expr                               # orExpr
     | expr AND expr                              # andExpr
     | expr (EQ | NEQ | LT | GT | LE | GE) expr   # compareExpr
-    | expr (ADD | SUB) expr                      # addExpr
     | expr (MUL | DIV | MOD) expr                # mulExpr
+    | expr (ADD | SUB) expr                      # addExpr
     | expr ASSIGN expr                           # assignExpr
     | (NOT | SUB) expr                            # unaryExpr  // unary minus and not
     | primary                                    # primaryExpr

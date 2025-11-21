@@ -11,10 +11,7 @@ function add(a as int, b as int) as int
 end function
 
 function main()
-    dim a as int
-    dim b as int
-    dim c as int
-    dim d as int
+
     a = 5;
     b = 10;
     c = 1;
