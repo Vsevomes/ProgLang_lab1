@@ -1,0 +1,90 @@
+function isPositive(x as int) as bool
+    dim temp as int
+    if x > 0 then
+        temp = x;
+    else
+        temp = 0;
+    end if
+end function
+
+function sumPositive(n as int) as int
+    dim i as int
+    dim sum as int
+
+    i = 0;
+    sum = 0;
+
+    do
+        if i > n then
+            break;
+        end if
+
+        if i > 0 then
+            sum = sum + i;
+        end if
+
+        i = i + 1;
+    loop while i <= n
+end function
+
+function findFirstPositive(arr as int(), size as int) as int
+    dim i as int
+    dim index as int
+
+    i = 0;
+    index = 0;
+
+    while i < size
+        if isPositive(arr(i)) then
+            index = i;
+            break;
+        else
+            i = i + 1;
+        end if
+    wend
+end function
+
+function processThreshold(arr as int(), size as int, threshold as int)
+    dim i as int
+    dim count as int
+
+    i = 0;
+    count = 0;
+
+    do
+        if i >= size then
+            break;
+        end if
+
+        if arr(i) > threshold then
+            count = count + 1;
+        end if
+
+        i = i + 1;
+    loop until i >= size
+end function
+
+function main()
+    dim n as int
+    dim result as int
+    dim arr as int()
+    dim i as int
+    dim firstPosIndex as int
+
+    n = 10;
+    result = sumPositive(n);
+
+    i = 0;
+    while i < n
+        if i < 5 then
+            arr(i) = i;
+        else
+            arr(i) = -i;
+        end if
+        i = i + 1;
+    wend
+
+    firstPosIndex = findFirstPositive(arr, n);
+
+    processThreshold(arr, n, 3);
+end function

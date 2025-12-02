@@ -30,9 +30,16 @@ ParseResult parseFromString(const std::string &source) {
     result.errors = errCollector.getErrorsAsStrings();
 
     ASTBuilder builder;
-    antlrcpp::Any a = builder.visit(tree);
-    if (!a.has_value()) {
-        result.root = std::any_cast<ASTNodePtr>(a);
+    antlrcpp::Any a = builder.visitSource(tree);
+    
+    if (a.has_value()) {
+        try {
+            result.root = std::any_cast<ASTNodePtr>(a);
+        } catch (const std::bad_any_cast &e) {
+            // что-то пошло не так при построении AST
+            result.errors.push_back(std::string("bad_any_cast при построении AST: ") + e.what());
+            result.root = nullptr;
+        }
     }
 
     return result;

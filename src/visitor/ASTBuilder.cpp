@@ -257,16 +257,34 @@ std::any ASTBuilder::visitPrimaryExpr(LangParser::PrimaryExprContext *ctx) {
 }
 
 std::any ASTBuilder::visitPrimary(LangParser::PrimaryContext *ctx) {
-    if (ctx->atom()) return visit(ctx->atom());
+    ASTNodePtr base;
+
+    // База вызова: идентификатор, литерал, скобочное выражение и т.п.
+    if (ctx->atom()) {
+        base = std::any_cast<ASTNodePtr>(visit(ctx->atom()));
+    }
+
+    // Если есть списки аргументов — это вызов/индексация: base(args...)
     if (!ctx->argExprList().empty()) {
-        // аргументы функций
-        auto node = makeNode("ArgExprListContainer");
+        auto callNode = makeNode("CallExpr");
+
+        if (base) {
+            callNode->children.push_back(base);
+        }
+
         for (auto args : ctx->argExprList()) {
             auto child = std::any_cast<ASTNodePtr>(visit(args));
-            if (child) node->children.push_back(child);
+            if (child) callNode->children.push_back(child);
         }
-        return node;
+
+        return callNode;
     }
+
+    // Просто атом без вызова
+    if (base) {
+        return base;
+    }
+
     return std::any();
 }
 
