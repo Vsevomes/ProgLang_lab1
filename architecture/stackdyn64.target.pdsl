@@ -1,0 +1,669 @@
+architecture stackdyn64 {
+
+	/*
+		Variant requirements:
+		  - typing: dynamic (value-place holds the type of last assigned value)
+		  - instruction format: stack-based
+		  - memory banks: code, data, stack
+		  - IO: via hidden register as port selector
+
+		Dynamic value representation used by this VM:
+		  Each runtime value is a 64-bit tagged value (TV).
+		    TV[63:56] = tag
+		    TV[55:0]  = payload
+		  Payload meaning depends on tag (examples):
+		    TAG_BOOL   = 0x01  payload = 0/1
+		    TAG_INT    = 0x02  payload = signed 56-bit (two's complement)
+		    TAG_UINT   = 0x03  payload = unsigned 56-bit
+		    TAG_CHAR   = 0x04  payload = Unicode code point (<= 0x10ffff)
+		    TAG_STRING = 0x05  payload = address/pointer into data/heap (implementation-defined)
+		    TAG_ARRAY  = 0x06  payload = address/pointer to array header (implementation-defined)
+
+		Notes about dynamic typing:
+		  - memory cells in DATA/STACK store full tagged values; writing a new tagged value
+		    to an address changes the "type" of that value-place.
+		  - arithmetic/compare/logical instructions below implement a minimal, well-defined
+		    coercion rule for "numeric" values (BOOL/CHAR/INT/UINT) by decoding payload.
+		    If a tag is not numeric, STATUS is set non-zero and execution halts (trap).
+	*/
+
+	registers:
+
+		storage ip [32];       // instruction pointer (byte address in CODE space)
+		storage sp [32];       // stack pointer (byte address in STACK space, grows down)
+		storage bp [32];       // base/frame pointer for call frames (in STACK space)
+
+		storage status [32];   // 0 = OK, non-zero = runtime trap
+
+		// temporaries (64-bit because we operate on tagged values)
+		storage t0 [64];
+		storage t1 [64];
+		storage t2 [64];
+			storage t3 [64];
+			storage t4 [64];
+			storage t5 [64];
+			storage t6 [64];
+			storage t7 [64];
+
+		// hidden IO port selector ("port"), used implicitly by IN/OUT
+		storage ioport [8];
+		// external device interface (environment-defined)
+		storage rin [8];
+		storage rout [8];
+
+	memory:
+
+		range code [0x0000 .. 0xffff] {
+			cell = 8;
+			endianess = little-endian;
+			granularity = 1;
+		}
+
+		range dataMem [0x0000 .. 0xffff] {
+			cell = 8;
+			endianess = little-endian;
+			granularity = 1;
+		}
+
+		range stackMem [0x0000 .. 0xffff] {
+			cell = 8;
+			endianess = little-endian;
+			granularity = 1;
+		}
+
+	instructions:
+
+		encode imm8  field = immediate [8];
+		encode imm16 field = immediate [16];
+		encode imm32 field = immediate [32];
+		encode imm64 field = immediate [64];
+
+		// --- helper constants (written inline where needed):
+		// mask56 = 0x00ffffffffffffff
+		// sign56 = 0x0080000000000000
+		// TAG_BOOL = 0x01 -> 0x0100000000000000
+		// TAG_INT  = 0x02 -> 0x0200000000000000
+
+		// -------- control / termination --------
+
+		instruction nop = { 0000 0000 } {
+			ip = ip + 1;
+		};
+
+		instruction hlt = { 0000 0001 } {
+			// stop execution
+		};
+
+		// absolute unconditional jump
+		instruction jmp = { 0001 0000, imm16 as target } {
+			ip = target;
+		};
+
+		// jump if top-of-stack is "false" (payload==0); pops 1 TV
+		instruction jz = { 0001 0001, imm16 as target } {
+			t0 = stackMem:8[sp];
+			sp = sp + 8;
+			t1 = t0 & 0x00ffffffffffffff; // payload
+			if t1 != 0 then
+				ip = ip + 3;     // non-zero => no jump
+			else
+				ip = target;     // zero => jump
+		};
+
+		// jump if top-of-stack is "true" (payload!=0); pops 1 TV
+		instruction jnz = { 0001 0010, imm16 as target } {
+			t0 = stackMem:8[sp];
+			sp = sp + 8;
+			t1 = t0 & 0x00ffffffffffffff; // payload
+			if t1 != 0 then
+				ip = target;
+			else
+				ip = ip + 3;
+		};
+
+		// call absolute; pushes (return_ip) and (old_bp) onto STACK
+		instruction call = { 0001 0011, imm16 as target } {
+			sp = sp - 8;
+			stackMem:8[sp] = ip + 3;     // return address
+			sp = sp - 8;
+			stackMem:8[sp] = bp;         // save caller bp
+			bp = sp;                  // new frame base
+			ip = target;
+		};
+
+		// return from call.
+		// Convention: callee places return value at [bp+16] before RET.
+		instruction ret = { 0001 0100 } {
+			t0 = stackMem:8[bp];          // old bp
+			ip = stackMem:8[bp + 8];      // return ip
+			sp = bp + 16;              // drop frame, leave return value at top for caller
+			bp = t0;
+		};
+
+		// -------- stack / data movement / constants --------
+
+		// initialize SP (use before first PUSH). value is a STACK-space byte address.
+		instruction ldsp = { 0001 0110, imm16 as value } {
+			sp = value;
+			ip = ip + 3;
+		};
+
+		// initialize BP (optional). value is a STACK-space byte address.
+		instruction ldbp = { 0001 0111, imm16 as value } {
+			bp = value;
+			ip = ip + 3;
+		};
+
+		// push 64-bit tagged constant
+		instruction push = { 0001 1000, imm64 as value } {
+			sp = sp - 8;
+			stackMem:8[sp] = value;
+			ip = ip + 9;
+		};
+
+		// duplicate top
+		instruction dup = { 0001 1001 } {
+			t0 = stackMem:8[sp];
+			sp = sp - 8;
+			stackMem:8[sp] = t0;
+			ip = ip + 1;
+		};
+
+		// drop top
+		instruction drop = { 0001 1010 } {
+			sp = sp + 8;
+			ip = ip + 1;
+		};
+
+		// swap top two
+		instruction swap = { 0001 1011 } {
+			t0 = stackMem:8[sp];
+			t1 = stackMem:8[sp + 8];
+			stackMem:8[sp] = t1;
+			stackMem:8[sp + 8] = t0;
+			ip = ip + 1;
+		};
+
+		// load tagged value from DATA: pop addr, push data[addr]
+		instruction load = { 0010 0000 } {
+			t0 = stackMem:8[sp];               // tagged address (treated as int)
+			t0 = t0 & 0x00ffffffffffffff;   // payload
+			stackMem:8[sp] = dataMem:8[t0];       // overwrite with loaded TV
+			ip = ip + 1;
+		};
+
+		// store tagged value into DATA: pop value; pop addr; data[addr]=value
+		instruction store = { 0010 0001 } {
+			t0 = stackMem:8[sp];               // value
+			t1 = stackMem:8[sp + 8];           // tagged address
+			t1 = t1 & 0x00ffffffffffffff;   // payload
+			dataMem:8[t1] = t0;
+			sp = sp + 16;
+			ip = ip + 1;
+		};
+
+		// load local/arg from STACK frame: push stack[bp + disp]
+		instruction ldfp = { 0010 0010, imm16 as disp } {
+			// sign-extend 16 -> 64
+			t0 = disp;
+			t0 = t0 ^ 0x8000;
+			t0 = t0 - 0x8000;
+			t1 = (bp + t0) & 0xffff;
+			sp = sp - 8;
+			stackMem:8[sp] = stackMem:8[t1];
+			ip = ip + 3;
+		};
+
+		// store local/arg into STACK frame: pop value; stack[bp + disp]=value
+		instruction stfp = { 0010 0011, imm16 as disp } {
+			t0 = disp;
+			t0 = t0 ^ 0x8000;
+			t0 = t0 - 0x8000;
+			t1 = (bp + t0) & 0xffff;
+			t2 = stackMem:8[sp];
+			stackMem:8[t1] = t2;
+			sp = sp + 8;
+			ip = ip + 3;
+		};
+
+		// -------- arithmetic / logical (dynamic) --------
+
+		// internal: decode numeric tagged value in T0 -> signed 64 in T0, trap if non-numeric
+		// numeric tags accepted: BOOL(0x01), INT(0x02), UINT(0x03), CHAR(0x04)
+		// (implemented inline in each op for clarity)
+
+		instruction add = { 0100 0000 } {
+			t0 = stackMem:8[sp];       // b
+			t1 = stackMem:8[sp + 8];   // a
+
+			// check tags (b)
+			t2 = (t0 >> 56) & 0xff;
+			t3 = ((t2 == 0x01) | (t2 == 0x02) | (t2 == 0x03) | (t2 == 0x04));
+					if t3 != 0 then
+						ip = ip; // ok
+					else {
+						status = 1;
+					}
+
+			// check tags (a)
+			t2 = (t1 >> 56) & 0xff;
+			t3 = ((t2 == 0x01) | (t2 == 0x02) | (t2 == 0x03) | (t2 == 0x04));
+					if t3 != 0 then
+						ip = ip; // ok
+					else {
+						status = 1;
+					}
+
+			// decode b to signed
+			t2 = t0 & 0x00ffffffffffffff;
+			t2 = (t2 ^ 0x0080000000000000) - 0x0080000000000000;
+			// decode a to signed into t0
+			t0 = t1 & 0x00ffffffffffffff;
+			t0 = (t0 ^ 0x0080000000000000) - 0x0080000000000000;
+
+			// a + b
+			t0 = t0 + t2;
+			// pack as TAG_INT
+			t0 = 0x0200000000000000 | (t0 & 0x00ffffffffffffff);
+
+			sp = sp + 8;
+			stackMem:8[sp] = t0;
+			ip = ip + 1;
+		};
+
+		instruction sub = { 0100 0001 } {
+			t0 = stackMem:8[sp];       // b
+			t1 = stackMem:8[sp + 8];   // a
+
+			t2 = (t0 >> 56) & 0xff;
+			t3 = ((t2 == 0x01) | (t2 == 0x02) | (t2 == 0x03) | (t2 == 0x04));
+					if t3 != 0 then
+						ip = ip; // ok
+					else {
+						status = 1;
+					}
+			t2 = (t1 >> 56) & 0xff;
+			t3 = ((t2 == 0x01) | (t2 == 0x02) | (t2 == 0x03) | (t2 == 0x04));
+					if t3 != 0 then
+						ip = ip; // ok
+					else {
+						status = 1;
+					}
+
+			t2 = t0 & 0x00ffffffffffffff;
+			t2 = (t2 ^ 0x0080000000000000) - 0x0080000000000000;
+			t0 = t1 & 0x00ffffffffffffff;
+			t0 = (t0 ^ 0x0080000000000000) - 0x0080000000000000;
+
+			t0 = t0 - t2;
+			t0 = 0x0200000000000000 | (t0 & 0x00ffffffffffffff);
+
+			sp = sp + 8;
+			stackMem:8[sp] = t0;
+			ip = ip + 1;
+		};
+
+		instruction mul = { 0100 0010 } {
+			t0 = stackMem:8[sp];
+			t1 = stackMem:8[sp + 8];
+
+			t2 = (t0 >> 56) & 0xff;
+			t3 = ((t2 == 0x01) | (t2 == 0x02) | (t2 == 0x03) | (t2 == 0x04));
+					if t3 != 0 then
+						ip = ip; // ok
+					else {
+						status = 1;
+					}
+			t2 = (t1 >> 56) & 0xff;
+			t3 = ((t2 == 0x01) | (t2 == 0x02) | (t2 == 0x03) | (t2 == 0x04));
+					if t3 != 0 then
+						ip = ip; // ok
+					else {
+						status = 1;
+					}
+
+			t2 = t0 & 0x00ffffffffffffff;
+			t2 = (t2 ^ 0x0080000000000000) - 0x0080000000000000;
+			t0 = t1 & 0x00ffffffffffffff;
+			t0 = (t0 ^ 0x0080000000000000) - 0x0080000000000000;
+
+			t0 = t0 * t2;
+			t0 = 0x0200000000000000 | (t0 & 0x00ffffffffffffff);
+
+			sp = sp + 8;
+			stackMem:8[sp] = t0;
+			ip = ip + 1;
+		};
+
+		instruction div = { 0100 0011 } {
+			t0 = stackMem:8[sp];
+			t1 = stackMem:8[sp + 8];
+
+			t2 = (t0 >> 56) & 0xff;
+			t3 = ((t2 == 0x01) | (t2 == 0x02) | (t2 == 0x03) | (t2 == 0x04));
+					if t3 != 0 then
+						ip = ip; // ok
+					else {
+						status = 1;
+					}
+			t2 = (t1 >> 56) & 0xff;
+			t3 = ((t2 == 0x01) | (t2 == 0x02) | (t2 == 0x03) | (t2 == 0x04));
+					if t3 != 0 then
+						ip = ip; // ok
+					else {
+						status = 1;
+					}
+
+			t2 = t0 & 0x00ffffffffffffff;
+			t2 = (t2 ^ 0x0080000000000000) - 0x0080000000000000;
+			t3 = (t2 == 0);
+				if t3 != 0 then {
+					status = 2; // div by zero
+				} else {
+					ip = ip; // ok
+				}
+
+			t0 = t1 & 0x00ffffffffffffff;
+			t0 = (t0 ^ 0x0080000000000000) - 0x0080000000000000;
+			t0 = t0 / t2;
+			t0 = 0x0200000000000000 | (t0 & 0x00ffffffffffffff);
+
+			sp = sp + 8;
+			stackMem:8[sp] = t0;
+			ip = ip + 1;
+		};
+
+		instruction mod = { 0100 0100 } {
+			t0 = stackMem:8[sp];
+			t1 = stackMem:8[sp + 8];
+
+			t2 = (t0 >> 56) & 0xff;
+			t3 = ((t2 == 0x01) | (t2 == 0x02) | (t2 == 0x03) | (t2 == 0x04));
+					if t3 != 0 then
+						ip = ip; // ok
+					else {
+						status = 1;
+					}
+			t2 = (t1 >> 56) & 0xff;
+			t3 = ((t2 == 0x01) | (t2 == 0x02) | (t2 == 0x03) | (t2 == 0x04));
+					if t3 != 0 then
+						ip = ip; // ok
+					else {
+						status = 1;
+					}
+
+			t2 = t0 & 0x00ffffffffffffff;
+			t2 = (t2 ^ 0x0080000000000000) - 0x0080000000000000;
+			t3 = (t2 == 0);
+				if t3 != 0 then {
+					status = 2;
+				} else {
+					ip = ip;
+				}
+
+			t0 = t1 & 0x00ffffffffffffff;
+			t0 = (t0 ^ 0x0080000000000000) - 0x0080000000000000;
+			t0 = t0 % t2;
+			t0 = 0x0200000000000000 | (t0 & 0x00ffffffffffffff);
+
+			sp = sp + 8;
+			stackMem:8[sp] = t0;
+			ip = ip + 1;
+		};
+
+		// comparisons: result is TAG_BOOL with payload 0/1
+		instruction eq = { 0100 1000 } {
+			t0 = stackMem:8[sp];
+			t1 = stackMem:8[sp + 8];
+			sp = sp + 8;
+			t2 = (t1 == t0);
+			stackMem:8[sp] = 0x0100000000000000 | (t2 & 1);
+			ip = ip + 1;
+		};
+
+		instruction neq = { 0100 1001 } {
+			t0 = stackMem:8[sp];
+			t1 = stackMem:8[sp + 8];
+			sp = sp + 8;
+			t2 = (t1 != t0);
+			stackMem:8[sp] = 0x0100000000000000 | (t2 & 1);
+			ip = ip + 1;
+		};
+
+		instruction lt = { 0100 1010 } {
+			t0 = stackMem:8[sp];
+			t1 = stackMem:8[sp + 8];
+
+			// numeric-only compare (decode signed)
+			t2 = (t0 >> 56) & 0xff;
+			t3 = ((t2 == 0x01) | (t2 == 0x02) | (t2 == 0x03) | (t2 == 0x04));
+					if t3 != 0 then
+						ip = ip; // ok
+					else {
+						status = 1;
+					}
+			t2 = (t1 >> 56) & 0xff;
+			t3 = ((t2 == 0x01) | (t2 == 0x02) | (t2 == 0x03) | (t2 == 0x04));
+					if t3 != 0 then
+						ip = ip; // ok
+					else {
+						status = 1;
+					}
+
+			t2 = t0 & 0x00ffffffffffffff;
+			t2 = (t2 ^ 0x0080000000000000) - 0x0080000000000000; // b
+			t0 = t1 & 0x00ffffffffffffff;
+			t0 = (t0 ^ 0x0080000000000000) - 0x0080000000000000; // a
+
+			sp = sp + 8;
+			t0 = (t0 < t2);
+			stackMem:8[sp] = 0x0100000000000000 | (t0 & 1);
+			ip = ip + 1;
+		};
+
+		instruction gt = { 0100 1011 } {
+			t0 = stackMem:8[sp];
+			t1 = stackMem:8[sp + 8];
+
+			t2 = (t0 >> 56) & 0xff;
+			t3 = ((t2 == 0x01) | (t2 == 0x02) | (t2 == 0x03) | (t2 == 0x04));
+					if t3 != 0 then
+						ip = ip; // ok
+					else {
+						status = 1;
+					}
+			t2 = (t1 >> 56) & 0xff;
+			t3 = ((t2 == 0x01) | (t2 == 0x02) | (t2 == 0x03) | (t2 == 0x04));
+					if t3 != 0 then
+						ip = ip; // ok
+					else {
+						status = 1;
+					}
+
+			t2 = t0 & 0x00ffffffffffffff;
+			t2 = (t2 ^ 0x0080000000000000) - 0x0080000000000000; // b
+			t0 = t1 & 0x00ffffffffffffff;
+			t0 = (t0 ^ 0x0080000000000000) - 0x0080000000000000; // a
+
+			sp = sp + 8;
+			t0 = (t0 > t2);
+			stackMem:8[sp] = 0x0100000000000000 | (t0 & 1);
+			ip = ip + 1;
+		};
+
+		instruction le = { 0100 1100 } {
+			t0 = stackMem:8[sp];
+			t1 = stackMem:8[sp + 8];
+
+			t2 = (t0 >> 56) & 0xff;
+			t3 = ((t2 == 0x01) | (t2 == 0x02) | (t2 == 0x03) | (t2 == 0x04));
+					if t3 != 0 then
+						ip = ip; // ok
+					else {
+						status = 1;
+					}
+			t2 = (t1 >> 56) & 0xff;
+			t3 = ((t2 == 0x01) | (t2 == 0x02) | (t2 == 0x03) | (t2 == 0x04));
+					if t3 != 0 then
+						ip = ip; // ok
+					else {
+						status = 1;
+					}
+
+			t2 = t0 & 0x00ffffffffffffff;
+			t2 = (t2 ^ 0x0080000000000000) - 0x0080000000000000;
+			t0 = t1 & 0x00ffffffffffffff;
+			t0 = (t0 ^ 0x0080000000000000) - 0x0080000000000000;
+
+			sp = sp + 8;
+			t0 = (t0 <= t2);
+			stackMem:8[sp] = 0x0100000000000000 | (t0 & 1);
+			ip = ip + 1;
+		};
+
+		instruction ge = { 0100 1101 } {
+			t0 = stackMem:8[sp];
+			t1 = stackMem:8[sp + 8];
+
+			t2 = (t0 >> 56) & 0xff;
+			t3 = ((t2 == 0x01) | (t2 == 0x02) | (t2 == 0x03) | (t2 == 0x04));
+					if t3 != 0 then
+						ip = ip; // ok
+					else {
+						status = 1;
+					}
+			t2 = (t1 >> 56) & 0xff;
+			t3 = ((t2 == 0x01) | (t2 == 0x02) | (t2 == 0x03) | (t2 == 0x04));
+					if t3 != 0 then
+						ip = ip; // ok
+					else {
+						status = 1;
+					}
+
+			t2 = t0 & 0x00ffffffffffffff;
+			t2 = (t2 ^ 0x0080000000000000) - 0x0080000000000000;
+			t0 = t1 & 0x00ffffffffffffff;
+			t0 = (t0 ^ 0x0080000000000000) - 0x0080000000000000;
+
+			sp = sp + 8;
+			t0 = (t0 >= t2);
+			stackMem:8[sp] = 0x0100000000000000 | (t0 & 1);
+			ip = ip + 1;
+		};
+
+		// logical AND/OR: treat as truthy if payload != 0; result TAG_BOOL
+		instruction land = { 0100 1110 } {
+			t0 = stackMem:8[sp];
+			t1 = stackMem:8[sp + 8];
+			sp = sp + 8;
+			t0 = ( (t0 & 0x00ffffffffffffff) != 0 ) && ( (t1 & 0x00ffffffffffffff) != 0 );
+			stackMem:8[sp] = 0x0100000000000000 | (t0 & 1);
+			ip = ip + 1;
+		};
+
+		instruction lor = { 0100 1111 } {
+			t0 = stackMem:8[sp];
+			t1 = stackMem:8[sp + 8];
+			sp = sp + 8;
+			t0 = ( (t0 & 0x00ffffffffffffff) != 0 ) || ( (t1 & 0x00ffffffffffffff) != 0 );
+			stackMem:8[sp] = 0x0100000000000000 | (t0 & 1);
+			ip = ip + 1;
+		};
+
+		instruction lnot = { 0101 0000 } {
+			t0 = stackMem:8[sp];
+			t0 = ( (t0 & 0x00ffffffffffffff) == 0 );
+			stackMem:8[sp] = 0x0100000000000000 | (t0 & 1);
+			ip = ip + 1;
+		};
+
+		// unary minus (numeric-only): -a
+		instruction neg = { 0101 0001 } {
+			t0 = stackMem:8[sp];
+			t1 = (t0 >> 56) & 0xff;
+			t3 = ((t1 == 0x01) | (t1 == 0x02) | (t1 == 0x03) | (t1 == 0x04));
+				if t3 != 0 then
+					ip = ip;
+				else {
+					status = 1;
+				}
+			t0 = t0 & 0x00ffffffffffffff;
+			t0 = (t0 ^ 0x0080000000000000) - 0x0080000000000000;
+			t0 = 0 - t0;
+			stackMem:8[sp] = 0x0200000000000000 | (t0 & 0x00ffffffffffffff);
+			ip = ip + 1;
+		};
+
+		// -------- IO via hidden port selector --------
+
+		// set hidden IO port register
+		instruction setio = { 0110 0000, imm8 as port } {
+			ioport = port;
+			ip = ip + 2;
+		};
+
+		// IN: read byte from current port (ioport), push TAG_INT payload=rin
+		// Environment is responsible for exposing the selected port value via RIN.
+		instruction inb = { 0110 0001 } {
+			sp = sp - 8;
+			stackMem:8[sp] = 0x0200000000000000 | (rin & 0xff);
+			ip = ip + 1;
+		};
+
+		// OUT: pop value, write low byte to current port (ioport) via ROUT
+		instruction outb = { 0110 0010 } {
+			t0 = stackMem:8[sp];
+			sp = sp + 8;
+			rout = t0 & 0xff;
+			ip = ip + 1;
+		};
+
+	mnemonics:
+
+		format plain0 is "";
+		format plain1 is "{1}";
+
+		mnemonic nop() plain0;
+		mnemonic hlt() plain0;
+
+		mnemonic jmp(target) plain1;
+		mnemonic jz(target) plain1;
+		mnemonic jnz(target) plain1;
+		mnemonic call(target) plain1;
+		mnemonic ret() plain0;
+
+		mnemonic ldsp(value) plain1;
+		mnemonic ldbp(value) plain1;
+
+		mnemonic push(value) plain1;
+		mnemonic dup() plain0;
+		mnemonic drop() plain0;
+		mnemonic swap() plain0;
+
+		mnemonic load() plain0;
+		mnemonic store() plain0;
+		mnemonic ldfp(disp) plain1;
+		mnemonic stfp(disp) plain1;
+
+		mnemonic add() plain0;
+		mnemonic sub() plain0;
+		mnemonic mul() plain0;
+		mnemonic div() plain0;
+		mnemonic mod() plain0;
+
+		mnemonic eq() plain0;
+		mnemonic neq() plain0;
+		mnemonic lt() plain0;
+		mnemonic gt() plain0;
+		mnemonic le() plain0;
+		mnemonic ge() plain0;
+
+		mnemonic land() plain0;
+		mnemonic lor() plain0;
+		mnemonic lnot() plain0;
+		mnemonic neg() plain0;
+
+		mnemonic setio(port) plain1;
+		mnemonic inb() plain0;
+		mnemonic outb() plain0;
+}

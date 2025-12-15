@@ -231,6 +231,16 @@ std::any ASTBuilder::visitOrExpr(LangParser::OrExprContext *ctx) {
 
 std::any ASTBuilder::visitCompareExpr(LangParser::CompareExprContext *ctx) {
     auto node = makeNode("CompareExpr");
+
+    // Сохраняем оператор сравнения в node->value
+    // (именно так его потом подхватит CFGBuild -> CodeGen)
+    if (ctx->EQ())      node->value = "==";
+    else if (ctx->NEQ()) node->value = "!=";   // или "<>" — зависит от твоего синтаксиса, но токен NEQ один
+    else if (ctx->LT())  node->value = "<";
+    else if (ctx->GT())  node->value = ">";
+    else if (ctx->LE())  node->value = "<=";
+    else if (ctx->GE())  node->value = ">=";
+
     for (auto e : ctx->expr()) {
         auto child = std::any_cast<ASTNodePtr>(visit(e));
         if (child) node->children.push_back(child);
@@ -240,13 +250,17 @@ std::any ASTBuilder::visitCompareExpr(LangParser::CompareExprContext *ctx) {
 
 std::any ASTBuilder::visitUnaryExpr(LangParser::UnaryExprContext *ctx) {
     auto node = makeNode("UnaryExpr");
+
+    // Сохраняем унарный оператор в node->value
+    if (ctx->NOT()) node->value = "not";
+    else if (ctx->SUB()) node->value = "-";
+
     if (ctx->expr()) {
         auto child = std::any_cast<ASTNodePtr>(visit(ctx->expr()));
         if (child) node->children.push_back(child);
     }
     return node;
 }
-
 
 std::any ASTBuilder::visitPrimaryExpr(LangParser::PrimaryExprContext *ctx) {
     // PrimaryExpr содержит один PrimaryContext
@@ -264,17 +278,27 @@ std::any ASTBuilder::visitPrimary(LangParser::PrimaryContext *ctx) {
         base = std::any_cast<ASTNodePtr>(visit(ctx->atom()));
     }
 
-    // Если есть списки аргументов — это вызов/индексация: base(args...)
-    if (!ctx->argExprList().empty()) {
+    // Если есть скобки вызова — это CallExpr даже если аргументов нет: base()
+    if (!ctx->LPAREN().empty()) {
         auto callNode = makeNode("CallExpr");
 
         if (base) {
             callNode->children.push_back(base);
         }
 
-        for (auto args : ctx->argExprList()) {
-            auto child = std::any_cast<ASTNodePtr>(visit(args));
-            if (child) callNode->children.push_back(child);
+        // В grammar: ('(' argExprList? ')')*  -> количество вызовов = количество '('
+        // argExprList может отсутствовать (пустые скобки), тогда добавляем пустой ArgExprList.
+        const auto& argLists = ctx->argExprList();
+        const size_t callCount = ctx->LPAREN().size();
+
+        for (size_t i = 0; i < callCount; ++i) {
+            if (i < argLists.size()) {
+                auto child = std::any_cast<ASTNodePtr>(visit(argLists[i]));
+                if (child) callNode->children.push_back(child);
+            } else {
+                // empty argument list for "()"
+                callNode->children.push_back(makeNode("ArgExprList"));
+            }
         }
 
         return callNode;

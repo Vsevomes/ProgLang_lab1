@@ -104,6 +104,13 @@ static OperationNodePtr buildExprOperation(const ASTNodePtr& node) {
         opNode->kind = OperationKind::BinaryOp;
         opNode->op   = name; // вид операции (с точностью до типа AST-узла)
 
+        if (name == "CompareExpr" && !node->value.empty()) {
+            Operand cmpOp;
+            cmpOp.kind  = OperandKind::Constant;
+            cmpOp.value = node->value; // "==", "!=", "<", "<=", ">", ">="
+            opNode->operands.push_back(cmpOp);
+        }
+
         for (const auto& ch : node->children) {
             auto childOp = buildExprOperation(ch);
             if (childOp) opNode->children.push_back(childOp);
@@ -116,6 +123,15 @@ static OperationNodePtr buildExprOperation(const ASTNodePtr& node) {
         auto opNode = std::make_shared<OperationNode>();
         opNode->kind = OperationKind::UnaryOp;
         opNode->op   = "UnaryExpr";
+
+        // --- IMPORTANT: preserve unary operator for codegen ("-" or "not")
+        if (!node->value.empty()) {
+            Operand unOp;
+            unOp.kind  = OperandKind::Constant;
+            unOp.value = node->value; // "-" or "not"
+            opNode->operands.push_back(unOp);
+        }
+
         if (!node->children.empty()) {
             auto childOp = buildExprOperation(node->children.front());
             if (childOp) opNode->children.push_back(childOp);

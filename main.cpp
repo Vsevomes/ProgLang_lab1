@@ -5,11 +5,17 @@
 #include <vector>
 #include <set>
 #include <map>
+#include <iomanip>
 #include <filesystem>
 
 #include "src/parser/ParserModule.h"   // ParseResult, parseFromString
 #include "src/cfg/CFGStructures.h"     // FileUnit, CFGAnalysisResult, FunctionInfo
 #include "src/cfg/CFGBuild.h"          // buildControlFlowGraphs
+
+#include "src/codegen/CodeGenModule.h" // buildProgramImage
+#include "src/codegen/VMImageStructures.h"     // ProgramImage listing structures
+
+#include "src/codegen/CodeGenModule.h" // stackdyn64_codegen::buildProgramImage
 
 namespace fs = std::filesystem;
 
@@ -168,27 +174,225 @@ static void writeCallGraphToDot(const CallGraph& cg,
     out << "}\n";
 }
 
+// ---------- Assembly listing printer (ProgramImage -> asm-listing style) ----------
+
+static const char* bankToString(stackdyn64::BankName b) {
+    using B = stackdyn64::BankName;
+    switch (b) {
+        case B::code:     return "code";
+        case B::dataMem:  return "dataMem";
+        case B::stackMem: return "stackMem";
+    }
+    return "<bank>";
+}
+
+static const char* dataDirToString(stackdyn64::DataDirective d) {
+    using D = stackdyn64::DataDirective;
+    switch (d) {
+        case D::db: return "db";
+        case D::dw: return "dw";
+        case D::dd: return "dd";
+        case D::dq: return "dq";
+    }
+    return "db";
+}
+
+static const char* resDirToString(stackdyn64::ReserveDirective d) {
+    using D = stackdyn64::ReserveDirective;
+    switch (d) {
+        case D::resb: return "resb";
+        case D::resw: return "resw";
+        case D::resd: return "resd";
+        case D::resq: return "resq";
+    }
+    return "resb";
+}
+
+static std::string hexU64(std::uint64_t v, int width = 0) {
+    std::ostringstream oss;
+    oss << "0x" << std::hex << std::uppercase;
+    if (width > 0) {
+        oss << std::setw(width) << std::setfill('0');
+    }
+    oss << v;
+    return oss.str();
+}
+
+static std::string operandToString(const stackdyn64::Operand& op) {
+    using K = stackdyn64::OperandKind;
+    switch (op.kind) {
+        case K::Imm8:   return hexU64(static_cast<std::uint8_t>(op.imm), 2);
+        case K::Imm16:  return hexU64(static_cast<std::uint16_t>(op.imm), 4);
+        case K::Imm64:  return hexU64(static_cast<std::uint64_t>(op.imm), 16);
+        case K::FrameDisp16: {
+            // Keep signed displacement readable.
+            return std::to_string(static_cast<std::int16_t>(op.imm));
+        }
+        case K::LabelRef:
+            return op.label;
+    }
+    return "?";
+}
+
+static void printInstruction(std::ostream& out, const stackdyn64::Instruction& ins) {
+    out << stackdyn64::toString(ins.mnemonic);
+    if (!ins.operands.empty()) {
+        out << " ";
+        for (std::size_t i = 0; i < ins.operands.size(); ++i) {
+            if (i) out << ", ";
+            out << operandToString(ins.operands[i]);
+        }
+    }
+    if (!ins.comment.empty()) {
+        out << " ; " << ins.comment;
+    }
+    out << "\n";
+}
+
+static void printDataDef(std::ostream& out, const stackdyn64::DataDef& d) {
+    out << dataDirToString(d.dir);
+    if (!d.values.empty()) {
+        out << " ";
+        for (std::size_t i = 0; i < d.values.size(); ++i) {
+            if (i) out << ", ";
+            // Print values in natural width for the directive.
+            const int w = (d.dir == stackdyn64::DataDirective::db) ? 2 :
+                          (d.dir == stackdyn64::DataDirective::dw) ? 4 :
+                          (d.dir == stackdyn64::DataDirective::dd) ? 8 : 16;
+            out << hexU64(d.values[i], w);
+        }
+    }
+    if (!d.comment.empty()) {
+        out << " ; " << d.comment;
+    }
+    out << "\n";
+}
+
+static void printReserveDef(std::ostream& out, const stackdyn64::ReserveDef& r) {
+    out << resDirToString(r.dir) << " " << r.count;
+    if (!r.comment.empty()) {
+        out << " ; " << r.comment;
+    }
+    out << "\n";
+}
+
+static void printLineItem(std::ostream& out, const stackdyn64::LineItem& li, int indent = 0);
+
+static void printTimes(std::ostream& out, const stackdyn64::Times& t, int indent) {
+    out << std::string(indent, ' ') << "times " << t.count << " ";
+    // times payload is a single LineItem, but we only allow payload part (no label).
+    stackdyn64::LineItem tmp = t.item;
+    tmp.label.reset();
+    // Print payload into a temporary buffer without newline indent tricks.
+    std::ostringstream oss;
+    printLineItem(oss, tmp, 0);
+    std::string s = oss.str();
+    // remove trailing newline
+    if (!s.empty() && s.back() == '\n') s.pop_back();
+    out << s;
+    out << "\n";
+}
+
+static void printLineItem(std::ostream& out, const stackdyn64::LineItem& li, int indent) {
+    // Label, if present, printed on its own line.
+    if (li.label.has_value()) {
+        out << std::string(indent, ' ') << li.label->rawName << ":\n";
+    }
+
+    const int payloadIndent = li.label.has_value() ? (indent + 2) : indent;
+    out << std::string(payloadIndent, ' ');
+
+    if (std::holds_alternative<stackdyn64::Instruction>(li.payload)) {
+        printInstruction(out, std::get<stackdyn64::Instruction>(li.payload));
+        return;
+    }
+    if (std::holds_alternative<stackdyn64::DataDef>(li.payload)) {
+        printDataDef(out, std::get<stackdyn64::DataDef>(li.payload));
+        return;
+    }
+    if (std::holds_alternative<stackdyn64::ReserveDef>(li.payload)) {
+        printReserveDef(out, std::get<stackdyn64::ReserveDef>(li.payload));
+        return;
+    }
+    if (std::holds_alternative<stackdyn64::CommentLine>(li.payload)) {
+        const auto& c = std::get<stackdyn64::CommentLine>(li.payload);
+        out << "; " << c.text << "\n";
+        return;
+    }
+    if (std::holds_alternative<std::shared_ptr<stackdyn64::Times>>(li.payload)) {
+        auto t = std::get<std::shared_ptr<stackdyn64::Times>>(li.payload);
+        if (t) {
+            // Re-print without the earlier payloadIndent prefix.
+            // Remove the prefix we already output:
+            // easiest: printTimes with indent and return, but we already printed spaces.
+            // So, if we hit Times we re-do the line:
+            //   1) back up: (not possible), therefore handle Times before prefix in callers.
+        }
+        out << "; <times?>\n";
+        return;
+    }
+
+    out << "; <unknown line>\n";
+}
+
+static void printProgramImage(std::ostream& out, const stackdyn64::ProgramImage& img) {
+    for (const auto& sec : img.sections) {
+        out << "[section " << sec.decl.name;
+        if (sec.decl.bank.has_value()) {
+            out << ", " << bankToString(*sec.decl.bank);
+        }
+        out << "]\n\n";
+
+        for (const auto& li : sec.lines) {
+            // Special-case Times so we can print it on one line nicely.
+            if (std::holds_alternative<std::shared_ptr<stackdyn64::Times>>(li.payload)) {
+                // Label still printed on its own line.
+                if (li.label.has_value()) {
+                    out << li.label->rawName << ":\n";
+                }
+                auto t = std::get<std::shared_ptr<stackdyn64::Times>>(li.payload);
+                if (t) {
+                    printTimes(out, *t, li.label.has_value() ? 2 : 0);
+                } else {
+                    out << "; <null times>\n";
+                }
+                continue;
+            }
+
+            printLineItem(out, li, 0);
+        }
+
+        out << "\n";
+    }
+}
+
 // ---------- main ----------
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         std::cerr << "Использование: " << argv[0]
-                  << " <input1> [input2 ...] [-o <output_dir>]\n";
+                  << " <input1> [input2 ...] -o <out.asm> [--dump-cfg]\n";
         return 1;
     }
 
     std::vector<std::string> inputFiles;
-    std::string outputDir;
+    std::string outputAsmFile;
+    bool dumpCfg = false;
 
-    // Разбор аргументов: все, что не -o/--out, считаем входными файлами
+    // Args:
+    //   -o/--out/--output <file> : output assembly listing file
+    //   --dump-cfg               : write CFG & callgraph DOT files (optional)
+    // Everything else is treated as an input source file.
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "-o" || arg == "--out" || arg == "--output") {
             if (i + 1 >= argc) {
-                std::cerr << "Ошибка: после " << arg << " требуется директория вывода.\n";
+                std::cerr << "Ошибка: после " << arg << " требуется имя выходного файла .asm\n";
                 return 1;
             }
-            outputDir = argv[++i];
+            outputAsmFile = argv[++i];
+        } else if (arg == "--dump-cfg" || arg == "--cfg") {
+            dumpCfg = true;
         } else {
             inputFiles.push_back(arg);
         }
@@ -197,6 +401,12 @@ int main(int argc, char* argv[]) {
     if (inputFiles.empty()) {
         std::cerr << "Ошибка: не указаны входные файлы.\n";
         return 1;
+    }
+
+    if (outputAsmFile.empty()) {
+        // default: place output next to first input
+        fs::path p(inputFiles.front());
+        outputAsmFile = (p.parent_path() / "out.asm").string();
     }
 
     bool hadErrors = false;
@@ -261,37 +471,36 @@ int main(int argc, char* argv[]) {
         hadErrors = true;
     }
 
-    // --- Шаг 3: вывод CFG каждой подпрограммы в отдельный файл ---
+    // --- Шаг 3 (опционально): вывод CFG каждой подпрограммы в отдельный файл ---
 
-    for (const auto& func : analysis.functions) {
-        fs::path srcPath(func.sourceFile);
-        fs::path outDirPath;
+    fs::path outAsmPath(outputAsmFile);
+    fs::path outDirPath = outAsmPath.parent_path();
+    if (outDirPath.empty()) outDirPath = fs::current_path();
 
-        if (!outputDir.empty()) {
-            outDirPath = fs::path(outputDir);
-        } else {
-            outDirPath = srcPath.parent_path(); // по-умолчанию — директория исходника
-        }
-
+    if (dumpCfg) {
         std::error_code ec;
         fs::create_directories(outDirPath, ec); // если уже существует — ок
 
-        std::string srcName = srcPath.stem().string();          // sourceName
-        std::string funcName = func.signature.name;             // functionName
-        fs::path outPath = outDirPath / (srcName + "." + funcName + ".dot");
+        for (const auto& func : analysis.functions) {
+            fs::path srcPath(func.sourceFile);
 
-        std::ofstream out(outPath);
-        if (!out.is_open()) {
-            std::cerr << "Ошибка: не удалось создать файл CFG " << outPath << "\n";
-            hadErrors = true;
-            continue;
+            std::string srcName = srcPath.stem().string();
+            std::string funcName = func.signature.name;
+            fs::path dotPath = outDirPath / (srcName + "." + funcName + ".dot");
+
+            std::ofstream out(dotPath);
+            if (!out.is_open()) {
+                std::cerr << "Ошибка: не удалось создать файл CFG " << dotPath << "\n";
+                hadErrors = true;
+                continue;
+            }
+
+            writeCFGToDot(func, out);
+            std::cerr << "CFG функции " << funcName << " записан в " << dotPath << "\n";
         }
-
-        writeCFGToDot(func, out);
-        std::cerr << "CFG функции " << funcName << " записан в " << outPath << "\n";
     }
 
-    // --- Шаг 4: построение графа вызовов по всем подпрограммам ---
+    // --- Шаг 4 (опционально): построение графа вызовов по всем подпрограммам ---
 
     std::set<std::string> functionNames;
     for (const auto& func : analysis.functions) {
@@ -308,32 +517,11 @@ int main(int argc, char* argv[]) {
                             cg);
     }
 
-    // Определяем директорию для файла графа вызовов
-    fs::path callGraphDir;
-    std::string mainSourceFile;
+    if (dumpCfg) {
+        std::error_code ec;
+        fs::create_directories(outDirPath, ec);
 
-    for (const auto& func : analysis.functions) {
-        if (func.signature.name == "main") {
-            mainSourceFile = func.sourceFile;
-            break;
-        }
-    }
-
-    if (!outputDir.empty()) {
-        callGraphDir = fs::path(outputDir);
-    } else if (!mainSourceFile.empty()) {
-        callGraphDir = fs::path(mainSourceFile).parent_path();
-    } else {
-        // fallback: директория первого входного файла
-        callGraphDir = fs::path(inputFiles.front()).parent_path();
-    }
-
-    std::error_code ec;
-    fs::create_directories(callGraphDir, ec);
-
-    fs::path callGraphPath = callGraphDir / "callgraph.dot";
-
-    {
+        fs::path callGraphPath = outDirPath / "callgraph.dot";
         std::ofstream out(callGraphPath);
         if (!out.is_open()) {
             std::cerr << "Ошибка: не удалось создать файл графа вызовов " << callGraphPath << "\n";
@@ -342,6 +530,26 @@ int main(int argc, char* argv[]) {
             writeCallGraphToDot(cg, functionNames, out);
             std::cerr << "Граф вызовов записан в " << callGraphPath << "\n";
         }
+    }
+
+    // --- Шаг 5: CodeGen -> ProgramImage ---
+
+    stackdyn64_codegen::CodeGenResult gen = stackdyn64_codegen::buildProgramImage(analysis);
+
+    // --- Шаг 6: вывести ассемблерный листинг в выходной файл ---
+
+    {
+        std::error_code ec;
+        fs::create_directories(outDirPath, ec);
+
+        std::ofstream out(outAsmPath);
+        if (!out.is_open()) {
+            std::cerr << "Ошибка: не удалось открыть выходной файл " << outAsmPath << "\n";
+            return 1;
+        }
+
+        printProgramImage(out, gen.image);
+        std::cerr << "Листинг записан в " << outAsmPath << "\n";
     }
 
     return hadErrors ? 1 : 0;
