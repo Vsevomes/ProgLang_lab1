@@ -1,4 +1,4 @@
-# ProgLang_lab1
+# ProgLang_lab2
 
 ## Build project
 
