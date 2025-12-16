@@ -1,4 +1,4 @@
-# ProgLang_lab1
+# ProgLang_lab3
 
 ## Build project
 
@@ -12,7 +12,7 @@ make -j$(nproc)
 ## Execute project example
 
 ```bash
-./ProgLangLab1 <input_file1> [input_file2 ... input_fileN] [-o <output_directory>]
+./ProgLangLab1 <input1> -o <out.asm> [--dump-cfg]
 ```
 
 I recommend you to use `tests` directory for your code examples, because its containe script of visualisation of dot files with graphs. But if you need, you can copy it in directory you want to work with.

@@ -4,4 +4,5 @@ build/
 *.dot
 *.log
 architecture/output
+*.ptptb
 tests/*.asm
