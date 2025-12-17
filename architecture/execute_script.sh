@@ -11,11 +11,13 @@ MANAGER=(mono Portable.RemoteTasks.Manager.exe)
 
 echo "Executing..."
 
-"${MANAGER[@]}" -ul "$LOGIN" -up "$PASSWORD" -w -s \
- ExecuteBinaryWithInput definitionFile "$ARC_FILE" \
+"${MANAGER[@]}" -ul "$LOGIN" -up "$PASSWORD" -il -w -s \
+ ExecuteBinaryWithInteractiveInput definitionFile "$ARC_FILE" \
  archName "$ARC" binaryFileToRun "$EXE" \
  ipRegStorageName ip finishMnemonicName hlt \
  codeRamBankName code stdinRegStName rin \
- stdoutRegStName rout inputFile in.txt > output
+ stdoutRegStName rout 
+ 
+rem inputFile in.txt > output
 
 echo "Result written in output"

@@ -1,37 +1,33 @@
-function ab_func(x as int)
-    dim b as int;
-    b = 2;
-    printInt(x + b);
-    println();
-end function
-
-function isPos(x)
-    if x > 0 then
-        c = 'Y';
-    else    
-        c = 'N';
-    end if
-    printChar(c);
-    println();
-end function
-
 function main()
-    v = 3;
-    p = 3;
-    r = 0;
+    x = 0;
+    flag = 0;
+    while 1   
+        if flag == 0 then
+            flag = 1;
+            op = readChar();
+        else
+            op = readChar();
+            op = readChar();
+        end if
 
-    ab_func(v);
+        num = readInt();
 
-    while v > 1
-        printInt(v);
+        if op == 43 then
+            x = x + num;
+        end if
+        if op == 45 then
+            x = x - num;
+        end if
+        if op == 42 then
+            x = x * num;
+        end if
+        if op == 47 then
+            x = x / num;
+        end if
+
+        temp = x;
+
+        printInt(x);
         println();
-        r = r + 1;
-        v = v - 1;
     wend
-
-    isPos(v);
-
-    r = r * 5 - p;
-
-    printInt(r);
 end function

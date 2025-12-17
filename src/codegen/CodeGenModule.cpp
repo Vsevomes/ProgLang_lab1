@@ -429,20 +429,107 @@ static void genCall(const OperationNodePtr& n, FnCtx& ctx) {
     }
 
     if (calleeRaw == "printInt") {
-        // Minimal version: prints one digit 0..9
-        if (n->children.size() >= 2) genExpr(n->children[1], ctx); // pushes int
-        emitPushImm(ctx.out, tvInt(0x30), "'0'");
-        stackdyn64::Instruction a;
-        a.mnemonic = stackdyn64::Mnemonic::add;
-        a.comment = "to ascii digit";
-        ctx.out.emitInstr(a);
+        // Full version: prints any non-negative integer by calling helper routine.
+        // Expects 1 arg.
+        if (n->children.size() >= 2) genExpr(n->children[1], ctx);
+        else emitPushImm(ctx.out, tvInt(0), "missing arg");
 
-        stackdyn64::Instruction o;
-        o.mnemonic = stackdyn64::Mnemonic::outb;
-        o.comment = "builtin printInt(0..9)";
-        ctx.out.emitInstr(o);
+        // push return slot
+        emitPushImm(ctx.out, tvInt(0), "return slot");
 
-        emitPushImm(ctx.out, tvInt(0), "printInt ret");
+        const std::string callee = "__builtin_printInt";
+
+        stackdyn64::Instruction call;
+        call.mnemonic = stackdyn64::Mnemonic::call;
+        call.operands = { stackdyn64::Operand::codeLabel(callee) };
+        call.comment = "call builtin printInt";
+        const std::size_t line = ctx.out.codeSec().lines.size();
+        ctx.out.image.fixups.push_back(stackdyn64::Fixup{ctx.out.codeSectionIndex, line, 0, callee, stackdyn64::LabelSpace::Code});
+        ctx.out.emitInstr(call);
+
+        // cleanup: spill return, drop arg, reload (leave 0 on stack)
+        const std::int16_t disp = tmpRetDisp(ctx.frame);
+        {
+            stackdyn64::Instruction st;
+            st.mnemonic = stackdyn64::Mnemonic::stfp;
+            st.operands = { stackdyn64::Operand::disp16(disp) };
+            st.comment = "spill builtin ret";
+            ctx.out.emitInstr(st);
+        }
+        {
+            stackdyn64::Instruction drop;
+            drop.mnemonic = stackdyn64::Mnemonic::drop;
+            drop.comment = "drop arg";
+            ctx.out.emitInstr(drop);
+        }
+        {
+            stackdyn64::Instruction ld;
+            ld.mnemonic = stackdyn64::Mnemonic::ldfp;
+            ld.operands = { stackdyn64::Operand::disp16(disp) };
+            ld.comment = "reload builtin ret";
+            ctx.out.emitInstr(ld);
+        }
+        return;
+    }
+
+     if (calleeRaw == "readChar") {
+        // set input port
+        {
+            stackdyn64::Instruction s;
+            s.mnemonic = stackdyn64::Mnemonic::setio;
+            s.operands = { stackdyn64::Operand::imm8(0) };
+            s.comment = "builtin readChar: setio stdin";
+            ctx.out.emitInstr(s);
+        }
+
+        // read byte -> pushes TAG_INT(payload=byte)
+        {
+            stackdyn64::Instruction in;
+            in.mnemonic = stackdyn64::Mnemonic::inb;
+            in.comment = "builtin readChar: inb";
+            ctx.out.emitInstr(in);
+        }
+
+        // restore output port (so printInt/printChar keep working)
+        {
+            stackdyn64::Instruction s;
+            s.mnemonic = stackdyn64::Mnemonic::setio;
+            s.operands = { stackdyn64::Operand::imm8(1) };
+            s.comment = "builtin readChar: restore stdout";
+            ctx.out.emitInstr(s);
+        }
+
+        return; // result already on stack
+    }
+
+    if (calleeRaw == "readInt") {
+        // call __builtin_readInt()
+        emitPushImm(ctx.out, tvInt(0), "return slot");
+        stackdyn64::Instruction call;
+        call.mnemonic = stackdyn64::Mnemonic::call;
+        call.operands = { stackdyn64::Operand::codeLabel("__builtin_readInt") };
+        call.comment = "builtin readInt";
+        const std::size_t line = ctx.out.codeSec().lines.size();
+        ctx.out.image.fixups.push_back(stackdyn64::Fixup{ctx.out.codeSectionIndex, line, 0,
+                                                        "__builtin_readInt", stackdyn64::LabelSpace::Code});
+        ctx.out.emitInstr(call);
+
+        // spill ret, no args to drop
+        const std::int16_t disp = tmpRetDisp(ctx.frame);
+        {
+            stackdyn64::Instruction st;
+            st.mnemonic = stackdyn64::Mnemonic::stfp;
+            st.operands = { stackdyn64::Operand::disp16(disp) };
+            st.comment = "spill readInt ret";
+            ctx.out.emitInstr(st);
+        }
+        {
+            stackdyn64::Instruction ld;
+            ld.mnemonic = stackdyn64::Mnemonic::ldfp;
+            ld.operands = { stackdyn64::Operand::disp16(disp) };
+            ld.comment = "reload readInt ret";
+            ctx.out.emitInstr(ld);
+        }
         return;
     }
 
@@ -709,6 +796,380 @@ static void lowerFunction(const FunctionInfo& fn, ImageBuilder& out, CodeGenResu
     }
 }
 
+
+// =============================================================================
+// Built-in helper routines
+// =============================================================================
+
+static void emitBuiltinPrintInt(ImageBuilder& out) {
+    // Prints non-negative integer x passed as first argument, returns 0.
+    // Recursively prints higher digits then prints last digit.
+    const std::string FN = "__builtin_printInt";
+    const std::string L_SINGLE = "__builtin_printInt_single";
+
+    out.emitCodeLabel(FN, FN);
+
+    // Prolog locals (2 slots): saved_x and tmp_ret
+    emitPushImm(out, tvInt(0), "local saved_x");
+    emitPushImm(out, tvInt(0), "local tmp");
+
+    // Load x (param0 at [bp+24])
+    {
+        stackdyn64::Instruction ld;
+        ld.mnemonic = stackdyn64::Mnemonic::ldfp;
+        ld.operands = { stackdyn64::Operand::disp16(24) };
+        ld.comment = "load x";
+        out.emitInstr(ld);
+    }
+
+    // if x >= 10 ?  (keep x on stack)
+    {
+        stackdyn64::Instruction dup;
+        dup.mnemonic = stackdyn64::Mnemonic::dup;
+        dup.comment = "dup x";
+        out.emitInstr(dup);
+    }
+    emitPushImm(out, tvInt(10), "10");
+    {
+        stackdyn64::Instruction ge;
+        ge.mnemonic = stackdyn64::Mnemonic::ge;
+        ge.comment = "x >= 10";
+        out.emitInstr(ge);
+    }
+    // if !(x >= 10) jump to single-digit path; jz pops condition, x remains
+    emitJcc(out, /*jnz=*/false, L_SINGLE, "single digit?");
+
+    // Multi-digit path: stack has [x]
+    {
+        stackdyn64::Instruction st;
+        st.mnemonic = stackdyn64::Mnemonic::stfp;
+        st.operands = { stackdyn64::Operand::disp16(-8) };
+        st.comment = "save x";
+        out.emitInstr(st); // pops x
+    }
+
+    // q = x / 10
+    {
+        stackdyn64::Instruction ld;
+        ld.mnemonic = stackdyn64::Mnemonic::ldfp;
+        ld.operands = { stackdyn64::Operand::disp16(-8) };
+        ld.comment = "reload x";
+        out.emitInstr(ld);
+    }
+    emitPushImm(out, tvInt(10), "10");
+    {
+        stackdyn64::Instruction div;
+        div.mnemonic = stackdyn64::Mnemonic::div;
+        div.comment = "q = x/10";
+        out.emitInstr(div);
+    }
+
+    // call self(q)
+    emitPushImm(out, tvInt(0), "return slot");
+    {
+        stackdyn64::Instruction call;
+        call.mnemonic = stackdyn64::Mnemonic::call;
+        call.operands = { stackdyn64::Operand::codeLabel(FN) };
+        call.comment = "recurse";
+        const std::size_t line = out.codeSec().lines.size();
+        out.image.fixups.push_back(stackdyn64::Fixup{out.codeSectionIndex, line, 0, FN, stackdyn64::LabelSpace::Code});
+        out.emitInstr(call);
+    }
+
+    // cleanup recursive call (1 arg): spill ret, drop arg
+    {
+        stackdyn64::Instruction st;
+        st.mnemonic = stackdyn64::Mnemonic::stfp;
+        st.operands = { stackdyn64::Operand::disp16(-16) };
+        st.comment = "spill recurse ret";
+        out.emitInstr(st); // pops ret
+    }
+    {
+        stackdyn64::Instruction drop;
+        drop.mnemonic = stackdyn64::Mnemonic::drop;
+        drop.comment = "drop recurse arg";
+        out.emitInstr(drop);
+    }
+
+    // digit = x % 10
+    {
+        stackdyn64::Instruction ld;
+        ld.mnemonic = stackdyn64::Mnemonic::ldfp;
+        ld.operands = { stackdyn64::Operand::disp16(-8) };
+        ld.comment = "reload x";
+        out.emitInstr(ld);
+    }
+    emitPushImm(out, tvInt(10), "10");
+    {
+        stackdyn64::Instruction mod;
+        mod.mnemonic = stackdyn64::Mnemonic::mod;
+        mod.comment = "digit = x%10";
+        out.emitInstr(mod);
+    }
+
+    // print digit
+    emitPushImm(out, tvInt(0x30), "'0'");
+    {
+        stackdyn64::Instruction add;
+        add.mnemonic = stackdyn64::Mnemonic::add;
+        add.comment = "to ascii";
+        out.emitInstr(add);
+    }
+    {
+        stackdyn64::Instruction outb;
+        outb.mnemonic = stackdyn64::Mnemonic::outb;
+        outb.comment = "outb";
+        out.emitInstr(outb);
+    }
+
+    // return 0
+    emitPushImm(out, tvInt(0), "ret 0");
+    {
+        stackdyn64::Instruction st;
+        st.mnemonic = stackdyn64::Mnemonic::stfp;
+        st.operands = { stackdyn64::Operand::disp16(16) };
+        st.comment = "write return slot";
+        out.emitInstr(st);
+    }
+    {
+        stackdyn64::Instruction r;
+        r.mnemonic = stackdyn64::Mnemonic::ret;
+        r.comment = "ret";
+        out.emitInstr(r);
+    }
+
+    // Single-digit path: label
+    out.emitCodeLabel(L_SINGLE, L_SINGLE);
+
+    // Stack has [x]
+    emitPushImm(out, tvInt(0x30), "'0'");
+    {
+        stackdyn64::Instruction add;
+        add.mnemonic = stackdyn64::Mnemonic::add;
+        add.comment = "to ascii";
+        out.emitInstr(add);
+    }
+    {
+        stackdyn64::Instruction outb;
+        outb.mnemonic = stackdyn64::Mnemonic::outb;
+        outb.comment = "outb";
+        out.emitInstr(outb);
+    }
+
+    // return 0
+    emitPushImm(out, tvInt(0), "ret 0");
+    {
+        stackdyn64::Instruction st;
+        st.mnemonic = stackdyn64::Mnemonic::stfp;
+        st.operands = { stackdyn64::Operand::disp16(16) };
+        st.comment = "write return slot";
+        out.emitInstr(st);
+    }
+    {
+        stackdyn64::Instruction r;
+        r.mnemonic = stackdyn64::Mnemonic::ret;
+        r.comment = "ret";
+        out.emitInstr(r);
+    }
+}
+
+static void emitBuiltinReadInt(ImageBuilder& out) {
+    const std::string FN = "__builtin_readInt";
+    const std::string L_loop = "__builtin_readInt_loop";
+    const std::string L_done = "__builtin_readInt_done";
+
+    out.emitCodeLabel(FN, FN);
+
+    // locals:
+    // [bp-8]  acc
+    // [bp-16] ch
+    // [bp-24] digit
+    emitPushImm(out, tvInt(0), "acc");
+    emitPushImm(out, tvInt(0), "ch");
+    emitPushImm(out, tvInt(0), "digit");
+
+    // acc = 0
+    emitPushImm(out, tvInt(0), "0");
+    {
+        stackdyn64::Instruction st;
+        st.mnemonic = stackdyn64::Mnemonic::stfp;
+        st.operands = { stackdyn64::Operand::disp16(-8) };
+        st.comment = "acc=0";
+        out.emitInstr(st);
+    }
+
+    out.emitCodeLabel(L_loop, L_loop);
+
+    // setio stdin (0)
+    {
+        stackdyn64::Instruction s;
+        s.mnemonic = stackdyn64::Mnemonic::setio;
+        s.operands = { stackdyn64::Operand::imm8(0) };
+        s.comment = "stdin";
+        out.emitInstr(s);
+    }
+    // inb -> pushes ch
+    {
+        stackdyn64::Instruction in;
+        in.mnemonic = stackdyn64::Mnemonic::inb;
+        in.comment = "read byte";
+        out.emitInstr(in);
+    }
+    // restore stdout (1)
+    {
+        stackdyn64::Instruction s;
+        s.mnemonic = stackdyn64::Mnemonic::setio;
+        s.operands = { stackdyn64::Operand::imm8(1) };
+        s.comment = "stdout";
+        out.emitInstr(s);
+    }
+    // store ch in local
+    {
+        stackdyn64::Instruction st;
+        st.mnemonic = stackdyn64::Mnemonic::stfp;
+        st.operands = { stackdyn64::Operand::disp16(-16) };
+        st.comment = "save ch";
+        out.emitInstr(st);
+    }
+
+    // if ch == '\n' (10) -> done
+    {
+        stackdyn64::Instruction ld;
+        ld.mnemonic = stackdyn64::Mnemonic::ldfp;
+        ld.operands = { stackdyn64::Operand::disp16(-16) };
+        ld.comment = "load ch";
+        out.emitInstr(ld);
+    }
+    emitPushImm(out, tvInt(10), "LF");
+    {
+        stackdyn64::Instruction eq;
+        eq.mnemonic = stackdyn64::Mnemonic::eq;
+        eq.comment = "ch==LF";
+        out.emitInstr(eq);
+    }
+    emitJcc(out, /*jnz=*/true, L_done, "if LF -> done");
+
+    // if ch < '0' -> done
+    {
+        stackdyn64::Instruction ld;
+        ld.mnemonic = stackdyn64::Mnemonic::ldfp;
+        ld.operands = { stackdyn64::Operand::disp16(-16) };
+        ld.comment = "load ch";
+        out.emitInstr(ld);
+    }
+    emitPushImm(out, tvInt(0x30), "'0'");
+    {
+        stackdyn64::Instruction lt;
+        lt.mnemonic = stackdyn64::Mnemonic::lt;
+        lt.comment = "ch<'0'";
+        out.emitInstr(lt);
+    }
+    emitJcc(out, /*jnz=*/true, L_done, "if <'0' -> done");
+
+    // if ch > '9' -> done
+    {
+        stackdyn64::Instruction ld;
+        ld.mnemonic = stackdyn64::Mnemonic::ldfp;
+        ld.operands = { stackdyn64::Operand::disp16(-16) };
+        ld.comment = "load ch";
+        out.emitInstr(ld);
+    }
+    emitPushImm(out, tvInt(0x39), "'9'");
+    {
+        stackdyn64::Instruction gt;
+        gt.mnemonic = stackdyn64::Mnemonic::gt;
+        gt.comment = "ch>'9'";
+        out.emitInstr(gt);
+    }
+    emitJcc(out, /*jnz=*/true, L_done, "if >'9' -> done");
+
+    // digit = ch - '0'
+    {
+        stackdyn64::Instruction ld;
+        ld.mnemonic = stackdyn64::Mnemonic::ldfp;
+        ld.operands = { stackdyn64::Operand::disp16(-16) };
+        ld.comment = "load ch";
+        out.emitInstr(ld);
+    }
+    emitPushImm(out, tvInt(0x30), "'0'");
+    {
+        stackdyn64::Instruction sub;
+        sub.mnemonic = stackdyn64::Mnemonic::sub;
+        sub.comment = "digit = ch-'0'";
+        out.emitInstr(sub);
+    }
+    {
+        stackdyn64::Instruction st;
+        st.mnemonic = stackdyn64::Mnemonic::stfp;
+        st.operands = { stackdyn64::Operand::disp16(-24) };
+        st.comment = "save digit";
+        out.emitInstr(st);
+    }
+
+    // acc = acc*10 + digit
+    {
+        stackdyn64::Instruction ld;
+        ld.mnemonic = stackdyn64::Mnemonic::ldfp;
+        ld.operands = { stackdyn64::Operand::disp16(-8) };
+        ld.comment = "load acc";
+        out.emitInstr(ld);
+    }
+    emitPushImm(out, tvInt(10), "10");
+    {
+        stackdyn64::Instruction mul;
+        mul.mnemonic = stackdyn64::Mnemonic::mul;
+        mul.comment = "acc*10";
+        out.emitInstr(mul);
+    }
+    {
+        stackdyn64::Instruction ld;
+        ld.mnemonic = stackdyn64::Mnemonic::ldfp;
+        ld.operands = { stackdyn64::Operand::disp16(-24) };
+        ld.comment = "load digit";
+        out.emitInstr(ld);
+    }
+    {
+        stackdyn64::Instruction add;
+        add.mnemonic = stackdyn64::Mnemonic::add;
+        add.comment = "acc*10+digit";
+        out.emitInstr(add);
+    }
+    {
+        stackdyn64::Instruction st;
+        st.mnemonic = stackdyn64::Mnemonic::stfp;
+        st.operands = { stackdyn64::Operand::disp16(-8) };
+        st.comment = "store acc";
+        out.emitInstr(st);
+    }
+
+    // loop
+    emitJmp(out, L_loop, "continue");
+
+    // done:
+    out.emitCodeLabel(L_done, L_done);
+
+    // return acc in [bp+16]
+    {
+        stackdyn64::Instruction ld;
+        ld.mnemonic = stackdyn64::Mnemonic::ldfp;
+        ld.operands = { stackdyn64::Operand::disp16(-8) };
+        ld.comment = "load acc";
+        out.emitInstr(ld);
+    }
+    {
+        stackdyn64::Instruction st;
+        st.mnemonic = stackdyn64::Mnemonic::stfp;
+        st.operands = { stackdyn64::Operand::disp16(16) };
+        st.comment = "return acc";
+        out.emitInstr(st);
+    }
+    {
+        stackdyn64::Instruction r;
+        r.mnemonic = stackdyn64::Mnemonic::ret;
+        out.emitInstr(r);
+    }
+}
+
 } // namespace
 
 // =============================================================================
@@ -775,6 +1236,10 @@ CodeGenResult buildProgramImage(const CFGAnalysisResult& analysis) {
         out.emitInstr(hlt);
     }
     out.image.entryLabel = "start";
+
+    // Emit built-in helper routines
+    emitBuiltinPrintInt(out);
+    emitBuiltinReadInt(out);
 
     // Lower each function
     for (const auto& fn : analysis.functions) {
