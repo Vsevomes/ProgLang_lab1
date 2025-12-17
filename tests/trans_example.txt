@@ -31,7 +31,7 @@ function main()
 
     isPos(v);
 
-    r = r + 5 - p;
+    r = r * 5 - p;
 
     printInt(r);
 end function
